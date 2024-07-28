@@ -108,6 +108,17 @@ public class FlutterSecureStoragePlugin implements MethodCallHandler, FlutterPlu
         }
     }
 
+    @FunctionalInterface
+    interface ExceptionableProvider<T> {
+        T run() throws Exception;
+    }
+
+
+    @FunctionalInterface
+    interface WrapperExceptionableProvider {
+        <T> T run(ExceptionableProvider<T> exceptionableProvider) throws Exception;
+    }
+
     /**
      * Wraps the functionality of onMethodCall() in a Runnable for execution in the worker thread.
      */
@@ -123,18 +134,31 @@ public class FlutterSecureStoragePlugin implements MethodCallHandler, FlutterPlu
         @SuppressWarnings("unchecked")
         @Override
         public void run() {
-            boolean resetOnError = false;
             try {
                 secureStorage.options = (Map<String, Object>) ((Map<String, Object>) call.arguments).get("options");
                 secureStorage.ensureOptions();
-                resetOnError = secureStorage.getResetOnError();
+                WrapperExceptionableProvider tryOperation = secureStorage.getResetOnError() ? new WrapperExceptionableProvider() {
+                    @Override
+                    public <T> T run(ExceptionableProvider<T> exceptionableFunction) throws Exception {
+                        try {
+                            return exceptionableFunction.run();
+                        } catch (Exception e) {
+                            secureStorage.deleteAll();
+                            return exceptionableFunction.run();
+                        }
+                    }
+                } : ExceptionableProvider::run;
                 switch (call.method) {
+
                     case "write": {
                         String key = getKeyFromCall(call);
                         String value = getValueFromCall(call);
 
                         if (value != null) {
-                            secureStorage.write(key, value);
+                            tryOperation.run(() -> {
+                                secureStorage.write(key, value);
+                                return null;
+                            });
                             result.success(null);
                         } else {
                             result.error("null", null, null);
@@ -144,8 +168,8 @@ public class FlutterSecureStoragePlugin implements MethodCallHandler, FlutterPlu
                     case "read": {
                         String key = getKeyFromCall(call);
 
-                        if (secureStorage.containsKey(key)) {
-                            String value = secureStorage.read(key);
+                        if (tryOperation.run(() -> secureStorage.containsKey(key))) {
+                            String value = tryOperation.run(() -> secureStorage.read(key));
                             result.success(value);
                         } else {
                             result.success(null);
@@ -153,25 +177,31 @@ public class FlutterSecureStoragePlugin implements MethodCallHandler, FlutterPlu
                         break;
                     }
                     case "readAll": {
-                        result.success(secureStorage.readAll());
+                        result.success(tryOperation.run(() -> secureStorage.readAll()));
                         break;
                     }
                     case "containsKey": {
                         String key = getKeyFromCall(call);
 
-                        boolean containsKey = secureStorage.containsKey(key);
+                        boolean containsKey = tryOperation.run(() -> secureStorage.containsKey(key));
                         result.success(containsKey);
                         break;
                     }
                     case "delete": {
                         String key = getKeyFromCall(call);
 
-                        secureStorage.delete(key);
+                        tryOperation.run(() -> {
+                            secureStorage.delete(key);
+                            return null;
+                        });
                         result.success(null);
                         break;
                     }
                     case "deleteAll": {
-                        secureStorage.deleteAll();
+                        tryOperation.run(() -> {
+                            secureStorage.deleteAll();
+                            return null;
+                        });
                         result.success(null);
                         break;
                     }
@@ -182,16 +212,7 @@ public class FlutterSecureStoragePlugin implements MethodCallHandler, FlutterPlu
             } catch (FileNotFoundException e) {
                 Log.i("Creating sharedPrefs", e.getLocalizedMessage());
             } catch (Exception e) {
-                if (resetOnError) {
-                    try {
-                        secureStorage.deleteAll();
-                        result.success("Data has been reset");
-                    } catch (Exception ex) {
-                        handleException(ex);
-                    }
-                } else {
-                    handleException(e);
-                }
+                handleException(e);
             }
         }
 
